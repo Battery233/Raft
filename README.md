@@ -1,4 +1,4 @@
-# FALL2020-P2-RELEASE
+# P2
 
 # RAFT
 
