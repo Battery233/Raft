@@ -78,11 +78,13 @@ type Raft struct {
 	me     int              // this peer's index into peers[]
 	logger *log.Logger      //  a separate logger per peer.
 
-	peerType int
+	applyChan chan ApplyCommand
+	peerType  int
 	//Persistent state on all servers:
 	currentTerm int //latest term server has seen (initialized to 0 on first boot, increases monotonically)
-	votedFor    int //candidateId that received vote in current term (or null if none)
-	logEntries  []logEntry
+	//todo update votedFor to -1 when a new term starts
+	votedFor   int //candidateId that received vote in current term (or null if none)
+	logEntries []logEntry
 
 	//Volatile state on all servers:
 	commitIndex int
@@ -155,6 +157,8 @@ type AppendEntriesReply struct {
 	Term    int  // currentTerm, for leader to update itself
 	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
 }
+
+//todo implementation!
 
 //
 // RequestVote
@@ -259,7 +263,7 @@ func (rf *Raft) PutCommand(command interface{}) (int, int, bool) {
 // turn off debug output from this instance
 //
 func (rf *Raft) Stop() {
-	// Your code here, if desired
+	//todo shutdown routines when stop is called
 }
 
 //
@@ -285,9 +289,19 @@ func (rf *Raft) Stop() {
 // NewPeer() must return quickly, so it should start Goroutines
 // for any long-running work
 func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
-	rf := &Raft{}
-	rf.peers = peers
-	rf.me = me
+	rf := &Raft{
+		peers:       peers,
+		me:          me,
+		applyChan:   applyCh,
+		peerType:    Follower,
+		currentTerm: 0,
+		votedFor:    -1,
+		logEntries:  make([]logEntry, 1),
+		commitIndex: 0,
+		lastApplied: 0,
+		nextIndex:   make([]int, len(peers)),
+		matchIndex:  make([]int, len(peers)),
+	}
 
 	if kEnableDebugLogs {
 		peerName := peers[me].String()
@@ -310,7 +324,11 @@ func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 		rf.logger = log.New(ioutil.Discard, "", 0)
 	}
 
-	// Your initialization code here (2A, 2B)
+	go rf.mainRoutine()
 
 	return rf
+}
+
+func (rf *Raft) mainRoutine() {
+	//todo
 }
