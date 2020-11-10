@@ -63,6 +63,9 @@ type ApplyCommand struct {
 	Command interface{}
 }
 
+//todo set print to false
+//todo check struct upper cases
+
 //
 // Raft struct
 // ===========
@@ -70,19 +73,37 @@ type ApplyCommand struct {
 // A Go object implementing a single Raft peer
 //
 type Raft struct {
-	mux   sync.Mutex       // Lock to protect shared access to this peer's state
-	peers []*rpc.ClientEnd // RPC end points of all peers
-	me    int              // this peer's index into peers[]
-	// You are expected to create reasonably clear log files before asking a
-	// debugging question on Piazza or OH. Use of this logger is optional, and
-	// you are free to remove it completely.
-	logger *log.Logger // We provide you with a separate logger per peer.
+	mux    sync.Mutex       // Lock to protect shared access to this peer's state
+	peers  []*rpc.ClientEnd // RPC end points of all peers
+	me     int              // this peer's index into peers[]
+	logger *log.Logger      //  a separate logger per peer.
 
-	// Your data here (2A, 2B).
-	// Look at the Raft paper's Figure 2 for a description of what
-	// state a Raft peer should maintain
+	peerType int
+	//Persistent state on all servers:
+	currentTerm int //latest term server has seen (initialized to 0 on first boot, increases monotonically)
+	votedFor    int //candidateId that received vote in current term (or null if none)
+	logEntries  []logEntry
 
+	//Volatile state on all servers:
+	commitIndex int
+	lastApplied int
+
+	//Volatile state on leaders:
+	//todo Reinitialized after election
+	nextIndex  []int
+	matchIndex []int
 }
+
+type logEntry struct {
+	Command interface{}
+	Term    int
+}
+
+const (
+	Follower = iota
+	Candidate
+	Leader
+)
 
 //
 // GetState()
@@ -92,11 +113,9 @@ type Raft struct {
 // believes it is the leader
 //
 func (rf *Raft) GetState() (int, int, bool) {
-	var me int
-	var term int
-	var isleader bool
-	// Your code here (2A)
-	return me, term, isleader
+	rf.mux.Lock()
+	defer rf.mux.Unlock()
+	return rf.me, rf.currentTerm, rf.peerType == Leader
 }
 
 //
@@ -105,12 +124,11 @@ func (rf *Raft) GetState() (int, int, bool) {
 //
 // Example RequestVote RPC arguments structure
 //
-// Please note
-// ===========
-// Field names must start with capital letters!
-//
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B)
+	Term         int // candidate’s term
+	CandidateId  int // candidate requesting vote
+	LastLogIndex int // index of candidate’s last log entry
+	LastLogTerm  int //term of candidate’s last log entry
 }
 
 //
@@ -119,13 +137,23 @@ type RequestVoteArgs struct {
 //
 // Example RequestVote RPC reply structure.
 //
-// Please note
-// ===========
-// Field names must start with capital letters!
-//
-//
 type RequestVoteReply struct {
-	// Your data here (2A)
+	Term        int  // currentTerm, for candidate to update itself
+	VoteGranted bool // true means candidate received vote
+}
+
+type AppendEntriesArgs struct {
+	Term         int        //leader’s term
+	LeaderId     int        //so follower can redirect clients
+	PrevLogIndex int        //index of log entry immediately preceding new ones
+	PrevLogTerm  int        //term of prevLogIndex entry
+	Entries      []logEntry // log entries to store (empty for heartbeat; may send more than one for efficiency)
+	LeaderCommit int        // leader’s commitIndex
+}
+
+type AppendEntriesReply struct {
+	Term    int  // currentTerm, for leader to update itself
+	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
 }
 
 //
