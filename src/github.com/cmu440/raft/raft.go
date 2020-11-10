@@ -34,8 +34,10 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/cmu440/rpc"
 )
@@ -96,7 +98,9 @@ type Raft struct {
 	matchIndex []int
 
 	//utils
-	stopSignalChan chan interface{}
+	stopSignalChan           chan struct{}
+	resetElectionTimeoutChan chan struct{}
+	electionSuccessChan      chan bool
 }
 
 type logEntry struct {
@@ -108,6 +112,12 @@ const (
 	Follower = iota
 	Candidate
 	Leader
+)
+
+const (
+	HeartbeatTime   = 150
+	ElectionMinTime = 300
+	ElectionMaxTime = 500
 )
 
 //
@@ -179,19 +189,24 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.peerType = Follower
 		rf.currentTerm = args.Term
 		//todo check if need to reset voted here?
+		//todo is this timer reset correct?
+		rf.resetElectionTimeoutChan <- struct{}{}
+
 	}
 
 	if args.Term == rf.currentTerm && (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
-		localLogIndex := len(rf.logEntries) - 1
-		if args.LastLogTerm > rf.logEntries[localLogIndex].Term ||
-			(args.LastLogTerm == rf.logEntries[localLogIndex].Term && args.LastLogIndex >= localLogIndex) {
+		lastLogIndex := len(rf.logEntries) - 1
+		if args.LastLogTerm > rf.logEntries[lastLogIndex].Term ||
+			(args.LastLogTerm == rf.logEntries[lastLogIndex].Term && args.LastLogIndex >= lastLogIndex) {
 			voteGranted = true
 			rf.votedFor = args.CandidateId
-			//todo reset timer?
+			//todo check the correctness of this code
+			rf.resetElectionTimeoutChan <- struct{}{}
 		}
 	}
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = voteGranted
+	rf.logger.Printf("RequestVote: Peer %v votes for peer %v: %v\n", rf.me, args.CandidateId, voteGranted)
 }
 
 //
@@ -314,18 +329,20 @@ func (rf *Raft) Stop() {
 // for any long-running work
 func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 	rf := &Raft{
-		peers:          peers,
-		me:             me,
-		applyChan:      applyCh,
-		peerType:       Follower,
-		currentTerm:    0,
-		votedFor:       -1,
-		logEntries:     make([]logEntry, 1),
-		commitIndex:    0,
-		lastApplied:    0,
-		nextIndex:      make([]int, len(peers)),
-		matchIndex:     make([]int, len(peers)),
-		stopSignalChan: make(chan interface{}),
+		peers:                    peers,
+		me:                       me,
+		applyChan:                applyCh,
+		peerType:                 Follower,
+		currentTerm:              0,
+		votedFor:                 -1,
+		logEntries:               make([]logEntry, 1),
+		commitIndex:              0,
+		lastApplied:              0,
+		nextIndex:                make([]int, len(peers)),
+		matchIndex:               make([]int, len(peers)),
+		stopSignalChan:           make(chan struct{}),
+		resetElectionTimeoutChan: make(chan struct{}),
+		electionSuccessChan:      make(chan bool),
 	}
 
 	if kEnableDebugLogs {
@@ -355,19 +372,71 @@ func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 }
 
 func (rf *Raft) mainRoutine() {
+	electionTimeoutTimer := randomElectionTimeoutTimer()
+	heartBeatTicker := time.NewTicker(time.Millisecond * time.Duration(HeartbeatTime))
+	heartBeatTicker.Stop()
 	for {
 		select {
 		case <-rf.stopSignalChan:
+			rf.logger.Printf("Peer %v stop() called!\n", rf.me)
 			return
-		default:
-			switch rf.peerType {
-			//todo implementation
-			case Follower:
-			case Candidate:
-			case Leader:
+		case <-rf.resetElectionTimeoutChan:
+			electionTimeoutTimer = randomElectionTimeoutTimer()
+		case <-electionTimeoutTimer.C:
+			electionTimeoutTimer = randomElectionTimeoutTimer()
+			go rf.startElection()
+		case <-rf.electionSuccessChan:
+			rf.mux.Lock()
+			if rf.peerType == Candidate {
+				rf.logger.Printf("Peer %v just elected as the leader!\n", rf.me)
+				heartBeatTicker.Reset(time.Millisecond * time.Duration(HeartbeatTime))
+				electionTimeoutTimer.Stop()
+				rf.peerType = Leader
 			}
+			rf.mux.Unlock()
+		case <-heartBeatTicker.C:
+			//todo leader heartbeat ticker?
 		}
-		//todo timer based?
 	}
 	//todo unlock check?!!!
+}
+
+func (rf *Raft) startElection() {
+	//todo check if this lock is correct
+	rf.mux.Lock()
+	defer rf.mux.Unlock()
+	rf.logger.Printf("Peer %v starts an new election\n", rf.me)
+	rf.peerType = Candidate
+	rf.currentTerm++
+	rf.votedFor = rf.me
+	majority := len(rf.peers)/2 + 1
+	currentVotes := 0
+	requestVoteArgs := &RequestVoteArgs{
+		Term:         rf.currentTerm,
+		CandidateId:  rf.me,
+		LastLogIndex: len(rf.logEntries) - 1,
+		LastLogTerm:  rf.logEntries[len(rf.logEntries)-1].Term,
+	}
+	for i := range rf.peers {
+		reply := &RequestVoteReply{}
+		rf.mux.Unlock()
+		ok := rf.sendRequestVote(i, requestVoteArgs, reply) //request rpc, unlock here
+		rf.mux.Lock()
+		if ok {
+			if reply.VoteGranted == true {
+				currentVotes++
+				if currentVotes >= majority {
+					rf.electionSuccessChan <- true
+					return
+				} else if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.votedFor = -1
+				}
+			}
+		}
+	}
+}
+
+func randomElectionTimeoutTimer() *time.Timer {
+	return time.NewTimer(time.Millisecond * time.Duration(ElectionMinTime+rand.Intn(ElectionMaxTime-ElectionMinTime)))
 }
