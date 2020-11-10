@@ -170,7 +170,28 @@ type AppendEntriesReply struct {
 // Example RequestVote RPC handler
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B)
+	// todo Your code here (2A, 2B)
+	rf.mux.Lock()
+	defer rf.mux.Unlock()
+
+	voteGranted := false
+	if args.Term > rf.currentTerm {
+		rf.peerType = Follower
+		rf.currentTerm = args.Term
+		//todo check if need to reset voted here?
+	}
+
+	if args.Term == rf.currentTerm && (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
+		localLogIndex := len(rf.logEntries) - 1
+		if args.LastLogTerm > rf.logEntries[localLogIndex].Term ||
+			(args.LastLogTerm == rf.logEntries[localLogIndex].Term && args.LastLogIndex >= localLogIndex) {
+			voteGranted = true
+			rf.votedFor = args.CandidateId
+			//todo reset timer?
+		}
+	}
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = voteGranted
 }
 
 //
@@ -335,18 +356,16 @@ func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 
 func (rf *Raft) mainRoutine() {
 	for {
-		rf.mux.Lock()
 		select {
 		case <-rf.stopSignalChan:
-			rf.mux.Unlock()
 			return
 		default:
 			switch rf.peerType {
+			//todo implementation
 			case Follower:
 			case Candidate:
 			case Leader:
 			}
-			rf.mux.Unlock()
 		}
 		//todo timer based?
 	}
