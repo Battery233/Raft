@@ -94,6 +94,9 @@ type Raft struct {
 	//todo Reinitialized after election
 	nextIndex  []int
 	matchIndex []int
+
+	//utils
+	stopSignalChan chan interface{}
 }
 
 type logEntry struct {
@@ -263,7 +266,7 @@ func (rf *Raft) PutCommand(command interface{}) (int, int, bool) {
 // turn off debug output from this instance
 //
 func (rf *Raft) Stop() {
-	//todo shutdown routines when stop is called
+	rf.stopSignalChan <- struct{}{}
 }
 
 //
@@ -290,17 +293,18 @@ func (rf *Raft) Stop() {
 // for any long-running work
 func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 	rf := &Raft{
-		peers:       peers,
-		me:          me,
-		applyChan:   applyCh,
-		peerType:    Follower,
-		currentTerm: 0,
-		votedFor:    -1,
-		logEntries:  make([]logEntry, 1),
-		commitIndex: 0,
-		lastApplied: 0,
-		nextIndex:   make([]int, len(peers)),
-		matchIndex:  make([]int, len(peers)),
+		peers:          peers,
+		me:             me,
+		applyChan:      applyCh,
+		peerType:       Follower,
+		currentTerm:    0,
+		votedFor:       -1,
+		logEntries:     make([]logEntry, 1),
+		commitIndex:    0,
+		lastApplied:    0,
+		nextIndex:      make([]int, len(peers)),
+		matchIndex:     make([]int, len(peers)),
+		stopSignalChan: make(chan interface{}),
 	}
 
 	if kEnableDebugLogs {
@@ -330,5 +334,21 @@ func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 }
 
 func (rf *Raft) mainRoutine() {
-	//todo
+	for {
+		rf.mux.Lock()
+		select {
+		case <-rf.stopSignalChan:
+			rf.mux.Unlock()
+			return
+		default:
+			switch rf.peerType {
+			case Follower:
+			case Candidate:
+			case Leader:
+			}
+			rf.mux.Unlock()
+		}
+		//todo timer based?
+	}
+	//todo unlock check?!!!
 }
