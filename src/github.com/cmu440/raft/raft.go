@@ -100,7 +100,7 @@ type Raft struct {
 	//utils
 	stopSignalChan           chan struct{}
 	resetElectionTimeoutChan chan struct{}
-	electionSuccessChan      chan bool
+	requestVoteResultChan    chan *RequestVoteReply
 }
 
 type logEntry struct {
@@ -214,7 +214,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	if resetVoteFor {
 		rf.votedFor = -1
- 	}
+	}
 
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = voteGranted
@@ -267,6 +267,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	if ok {
+		rf.requestVoteResultChan <- reply
+	}
 	return ok
 }
 
@@ -354,7 +357,7 @@ func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 		matchIndex:               make([]int, len(peers)),
 		stopSignalChan:           make(chan struct{}),
 		resetElectionTimeoutChan: make(chan struct{}),
-		electionSuccessChan:      make(chan bool),
+		requestVoteResultChan:    make(chan *RequestVoteReply),
 	}
 
 	if kEnableDebugLogs {
@@ -387,6 +390,8 @@ func (rf *Raft) mainRoutine() {
 	electionTimeoutTimer := randomElectionTimeoutTimer()
 	heartBeatTicker := time.NewTicker(time.Millisecond * time.Duration(HeartbeatTime))
 	heartBeatTicker.Stop()
+	currentVotes := 0
+	majority := len(rf.peers)/2 + 1
 	for {
 		select {
 		case <-rf.stopSignalChan:
@@ -397,13 +402,25 @@ func (rf *Raft) mainRoutine() {
 		case <-electionTimeoutTimer.C:
 			electionTimeoutTimer = randomElectionTimeoutTimer()
 			go rf.startElection()
-		case <-rf.electionSuccessChan:
+		case reply := <-rf.requestVoteResultChan:
 			rf.mux.Lock()
 			if rf.peerType == Candidate {
-				rf.logger.Printf("Peer %v just elected as the leader!\n", rf.me)
-				heartBeatTicker.Reset(time.Millisecond * time.Duration(HeartbeatTime))
-				electionTimeoutTimer.Stop()
-				rf.peerType = Leader
+				if reply.VoteGranted == true {
+					currentVotes++
+					if currentVotes >= majority {
+						rf.logger.Printf("Peer %v just elected as the leader!\n", rf.me)
+						heartBeatTicker.Reset(time.Millisecond * time.Duration(HeartbeatTime))
+						//todo restart it when the leader steps down!
+						electionTimeoutTimer.Stop()
+						rf.peerType = Leader
+						currentVotes = 0
+					}
+				} else if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.votedFor = -1
+					currentVotes = 0
+					rf.peerType = Follower
+				}
 			}
 			rf.mux.Unlock()
 		case <-heartBeatTicker.C:
@@ -416,37 +433,20 @@ func (rf *Raft) mainRoutine() {
 func (rf *Raft) startElection() {
 	//todo check if this lock is correct
 	rf.mux.Lock()
-	defer rf.mux.Unlock()
 	rf.logger.Printf("Peer %v starts an new election\n", rf.me)
 	rf.peerType = Candidate
 	rf.currentTerm++
 	rf.votedFor = rf.me
-	majority := len(rf.peers)/2 + 1
-	currentVotes := 0
 	requestVoteArgs := &RequestVoteArgs{
 		Term:         rf.currentTerm,
 		CandidateId:  rf.me,
 		LastLogIndex: len(rf.logEntries) - 1,
 		LastLogTerm:  rf.logEntries[len(rf.logEntries)-1].Term,
 	}
+	rf.mux.Unlock()
 	for i := range rf.peers {
 		reply := &RequestVoteReply{}
-		rf.mux.Unlock()
-		ok := rf.sendRequestVote(i, requestVoteArgs, reply) //request rpc, unlock here
-		rf.mux.Lock()
-		if ok {
-			if reply.VoteGranted == true {
-				currentVotes++
-				if currentVotes >= majority {
-					rf.electionSuccessChan <- true
-					return
-				} else if reply.Term > rf.currentTerm {
-					rf.currentTerm = reply.Term
-					rf.votedFor = -1
-					//todo set peer back to follower?
-				}
-			}
-		}
+		go rf.sendRequestVote(i, requestVoteArgs, reply) //request rpc, unlock here
 	}
 }
 
