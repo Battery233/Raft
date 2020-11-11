@@ -140,8 +140,9 @@ func (rf *Raft) GetState() (int, int, bool) {
 // Example RequestVote RPC arguments structure
 //
 type RequestVoteArgs struct {
-	Term         int // candidate’s term
-	CandidateId  int // candidate requesting vote
+	Term        int // candidate’s term
+	CandidateId int // candidate requesting vote
+	//todo check these two
 	LastLogIndex int // index of candidate’s last log entry
 	LastLogTerm  int //term of candidate’s last log entry
 }
@@ -273,6 +274,26 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.logger.Println("heartbeat!")
+	rf.mux.Lock()
+	defer rf.mux.Unlock()
+	rf.resetElectionTimeoutChan <- struct{}{}
+	if args.Term < rf.currentTerm {
+		reply.Success = false
+	} else {
+		rf.currentTerm = args.Term
+		//todo if log mismatch
+		reply.Success = true
+	}
+	reply.Term = rf.currentTerm
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
 //
 // PutCommand
 // =====
@@ -381,6 +402,11 @@ func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 		rf.logger = log.New(ioutil.Discard, "", 0)
 	}
 
+	rf.logEntries[0] = logEntry{
+		Command: nil,
+		Term:    -1,
+	}
+
 	go rf.mainRoutine()
 
 	return rf
@@ -400,6 +426,7 @@ func (rf *Raft) mainRoutine() {
 		case <-rf.resetElectionTimeoutChan:
 			electionTimeoutTimer = randomElectionTimeoutTimer()
 		case <-electionTimeoutTimer.C:
+			currentVotes = 0
 			electionTimeoutTimer = randomElectionTimeoutTimer()
 			go rf.startElection()
 		case reply := <-rf.requestVoteResultChan:
@@ -414,6 +441,11 @@ func (rf *Raft) mainRoutine() {
 						electionTimeoutTimer.Stop()
 						rf.peerType = Leader
 						currentVotes = 0
+						for i := range rf.nextIndex {
+							rf.nextIndex[i] = len(rf.logEntries)
+							rf.matchIndex[i] = 0
+						}
+						rf.matchIndex[rf.me] = len(rf.logEntries) - 1
 					}
 				} else if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
@@ -424,7 +456,8 @@ func (rf *Raft) mainRoutine() {
 			}
 			rf.mux.Unlock()
 		case <-heartBeatTicker.C:
-			//todo leader heartbeat ticker?
+			//todo new routine or not?
+			go rf.sendHeartbeats()
 		}
 	}
 	//todo unlock check?!!!
@@ -448,6 +481,28 @@ func (rf *Raft) startElection() {
 		reply := &RequestVoteReply{}
 		go rf.sendRequestVote(i, requestVoteArgs, reply) //request rpc, unlock here
 	}
+}
+
+func (rf *Raft) sendHeartbeats() {
+	//todo add actual entries later
+	rf.mux.Lock()
+	defer rf.mux.Unlock()
+	for i := range rf.peers {
+		args := &AppendEntriesArgs{
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: rf.nextIndex[i] - 1,
+			PrevLogTerm:  rf.logEntries[rf.nextIndex[i]-1].Term,
+			Entries:      nil,
+			LeaderCommit: rf.commitIndex,
+		}
+		reply := &AppendEntriesReply{}
+
+		if i != rf.me {
+			go rf.sendAppendEntries(i, args, reply)
+		}
+	}
+
 }
 
 func randomElectionTimeoutTimer() *time.Timer {
