@@ -125,14 +125,10 @@ func TestSmallPartitionConsensusHidden2A(t *testing.T) {
 
 	cfg.disconnect_partition(partition2)
 	println("Forming partition2 with leader and 1 nodes\n")
-
-	time.Sleep(time.Millisecond*300)
 	if leader1!=cfg.checkLeaderInPartition(partition2){
 		t.Fatal("Fatal!leader1!=cfg.checkLeaderInPartition(partition2)")
 	}
 	cfg.checkLeaderInPartition(set2)
-	cfg.connect_partition(partition2)
-	time.Sleep(time.Millisecond*500)
 	cfg.checkOneLeader()
 
 	fmt.Printf("======================= END =======================\n\n")
@@ -222,14 +218,11 @@ func TestLargePartitionHidden2A(t *testing.T)  {
 
 	cfg.disconnect_partition(partition2)
 	println("Forming partition2 with leader and 1 nodes\n")
-
-	time.Sleep(time.Millisecond*800)
 	cfg.checkLeaderInPartition(partition2)
 	cfg.checkLeaderInPartition(set2)
 	cfg.connect_partition(partition2)
-	time.Sleep(time.Millisecond*1000)
+	time.Sleep(time.Millisecond*2000)
 	cfg.checkOneLeader()
-
 	fmt.Printf("======================= END =======================\n\n")
 }
 
