@@ -117,7 +117,7 @@ const (
 const (
 	HeartbeatTime   = 150
 	ElectionMinTime = 300
-	ElectionMaxTime = 500
+	ElectionMaxTime = 600
 )
 
 //
@@ -185,13 +185,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mux.Unlock()
 
 	voteGranted := false
+	resetVoteFor := false
 	if args.Term > rf.currentTerm {
 		rf.peerType = Follower
 		rf.currentTerm = args.Term
 		//todo check if need to reset voted here?
+		resetVoteFor = true
+		rf.logger.Printf("RequestVote: Peer %v term updated\n", rf.me)
 		//todo is this timer reset correct?
 		rf.resetElectionTimeoutChan <- struct{}{}
-
 	}
 
 	if args.Term == rf.currentTerm && (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
@@ -199,14 +201,24 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if args.LastLogTerm > rf.logEntries[lastLogIndex].Term ||
 			(args.LastLogTerm == rf.logEntries[lastLogIndex].Term && args.LastLogIndex >= lastLogIndex) {
 			voteGranted = true
+			resetVoteFor = false
 			rf.votedFor = args.CandidateId
 			//todo check the correctness of this code
 			rf.resetElectionTimeoutChan <- struct{}{}
+		} else {
+			rf.logger.Printf("RequestVote: Peer %v else 1\n", rf.me)
 		}
+	} else {
+		rf.logger.Printf("RequestVote: Peer %v else 2\n", rf.me)
 	}
+
+	if resetVoteFor {
+		rf.votedFor = -1
+ 	}
+
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = voteGranted
-	rf.logger.Printf("RequestVote: Peer %v votes for peer %v: %v\n", rf.me, args.CandidateId, voteGranted)
+	rf.logger.Printf("RequestVote: Peer %v votes for peer %v: %v,  args:%v, me:%v\n", rf.me, args.CandidateId, voteGranted, args.Term, rf.currentTerm)
 }
 
 //
@@ -431,6 +443,7 @@ func (rf *Raft) startElection() {
 				} else if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
 					rf.votedFor = -1
+					//todo set peer back to follower?
 				}
 			}
 		}
