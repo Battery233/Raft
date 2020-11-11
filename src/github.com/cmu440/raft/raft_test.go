@@ -61,6 +61,258 @@ func TestReElection2A(t *testing.T) {
 	fmt.Printf("======================= END =======================\n\n")
 }
 
+func TestReElectionHidden2A(t *testing.T) {
+	fmt.Printf("==================== 3 SERVERS ====================\n")
+	servers := 3
+	cfg := make_config(t, servers, false)
+	defer cfg.cleanup()
+
+	fmt.Printf("TestReElectionHidden2A\n")
+	fmt.Printf("Basic 1 leader\n")
+	leader1 := cfg.checkOneLeader()
+
+	// if the leader disconnects, a new one should be elected.
+	fmt.Printf("Disconnecting leader\n")
+	cfg.disconnect(leader1)
+
+
+	// a new leader should be elected
+	fmt.Printf("Checking for a new leader\n")
+	leader2:=cfg.checkOneLeader()
+	cfg.connect(leader1)
+	time.Sleep(time.Millisecond*300)
+	if cfg.checkOneLeader()!=leader2{
+		t.Fatal("Error at TestReElectionHidden2A fatal 1")
+	}
+
+	cfg.disconnect(leader1)
+	cfg.disconnect(leader2)
+	time.Sleep(time.Millisecond*300)
+
+	cfg.checkNoLeader()
+	cfg.connect(leader1)
+	cfg.checkOneLeader()
+	cfg.connect(leader2)
+	cfg.checkOneLeader()
+	fmt.Printf("======================= END =======================\n\n")
+}
+
+func TestSmallPartitionConsensusHidden2A(t *testing.T) {
+	fmt.Printf("==================== 3 SERVERS ====================\n")
+	servers := 5
+	cfg := make_config(t, servers, false)
+	defer cfg.cleanup()
+
+	fmt.Printf("Hidden Test (2A): partitioned leaders with possible consensus\n")
+	fmt.Printf("Basic 1 leader\n")
+	leader1 := cfg.checkOneLeader()
+	follower1 := (leader1 + 1) % 5
+
+	partition2 := IntSet{}
+	partition2[leader1] = struct{}{}
+	partition2[follower1] = struct{}{}
+
+	set2 := IntSet{
+		0: struct{}{},
+		1: struct{}{},
+		2: struct{}{},
+		3: struct{}{},
+		4: struct{}{}}
+	delete(set2, leader1)
+	delete(set2, follower1)
+
+	cfg.disconnect_partition(partition2)
+	println("Forming partition2 with leader and 1 nodes\n")
+
+	time.Sleep(time.Millisecond*300)
+	if leader1!=cfg.checkLeaderInPartition(partition2){
+		t.Fatal("Fatal!leader1!=cfg.checkLeaderInPartition(partition2)")
+	}
+	cfg.checkLeaderInPartition(set2)
+	cfg.connect_partition(partition2)
+	time.Sleep(time.Millisecond*300)
+	cfg.checkOneLeader()
+
+	fmt.Printf("======================= END =======================\n\n")
+}
+
+
+func TestSmallPartitionNoConsensusHidden2A(t *testing.T)  {
+	fmt.Printf("==================== 5 SERVERS ====================\n")
+	servers := 5
+	cfg := make_config(t, servers, false)
+	defer cfg.cleanup()
+
+	fmt.Printf("Hidden Test (2A): partitioned leaders with possible consensus\n")
+	fmt.Printf("Basic 1 leader\n")
+	leader1 := cfg.checkOneLeader()
+	follower1 := (leader1 + 1) % 5
+	follower2 := (leader1 + 2) % 5
+	fmt.Printf("checked on leader = %v\n",leader1)
+
+	partition2 := IntSet{}
+	partition2[leader1] = struct{}{}
+	partition2[follower1] = struct{}{}
+	partition2[follower2] = struct{}{}
+	set2 := IntSet{
+		0: struct{}{},
+		1: struct{}{},
+		2: struct{}{},
+		3: struct{}{},
+		4: struct{}{}}
+	delete(set2, leader1)
+	delete(set2, follower1)
+	delete(set2, follower2)
+
+	println("BEfORE disconnect!")
+
+	cfg.disconnect_partition(partition2)
+	println("Forming partition2 with leader and 1 nodes\n")
+
+	time.Sleep(time.Millisecond*300)
+	cfg.checkLeaderInPartition(partition2)
+
+	cfg.checkNoLeaderInPartition(set2)
+
+	cfg.connect_partition(partition2)
+	time.Sleep(time.Millisecond*300)
+
+	fmt.Printf("======================= END =======================\n\n")
+}
+
+
+
+func TestLargePartitionHidden2A(t *testing.T)  {
+	fmt.Printf("==================== 11 SERVERS ====================\n")
+	servers := 11
+	cfg := make_config(t, servers, false)
+	defer cfg.cleanup()
+
+	fmt.Printf("Hidden Test (2A): partitioned leaders with possible consensus\n")
+	fmt.Printf("Basic 1 leader\n")
+	leader1 := cfg.checkOneLeader()
+	follower1 := (leader1 + 1) % 11
+	follower2 := (leader1 + 2) % 11
+	follower3 := (leader1 + 3) % 11
+
+	partition2 := IntSet{}
+	partition2[leader1] = struct{}{}
+	partition2[follower1] = struct{}{}
+	partition2[follower2] = struct{}{}
+	partition2[follower3] = struct{}{}
+	set2 := IntSet{
+		0: struct{}{},
+		1: struct{}{},
+		2: struct{}{},
+		3: struct{}{},
+		4: struct{}{},
+		5: struct{}{},
+		6: struct{}{},
+		7: struct{}{},
+		8: struct{}{},
+		9: struct{}{},
+		10: struct{}{},
+	}
+	delete(set2, leader1)
+	delete(set2, follower1)
+	delete(set2, follower2)
+	delete(set2, follower3)
+
+	cfg.disconnect_partition(partition2)
+	println("Forming partition2 with leader and 1 nodes\n")
+
+	time.Sleep(time.Millisecond*300)
+	cfg.checkLeaderInPartition(partition2)
+	cfg.checkLeaderInPartition(set2)
+	cfg.connect_partition(partition2)
+	time.Sleep(time.Millisecond*300)
+	cfg.checkOneLeader()
+
+	fmt.Printf("======================= END =======================\n\n")
+}
+
+
+func TestLargePartitionNoConsensusHidden2A (t *testing.T)  {
+	fmt.Printf("==================== 11 SERVERS ====================\n")
+	servers := 11
+	cfg := make_config(t, servers, false)
+	defer cfg.cleanup()
+
+	fmt.Printf("Hidden Test (2A): partitioned leaders with possible consensus\n")
+	fmt.Printf("Basic 1 leader\n")
+	leader1 := cfg.checkOneLeader()
+	follower1 := (leader1 + 1) % 11
+	follower2 := (leader1 + 2) % 11
+	follower3 := (leader1 + 3) % 11
+	follower4 := (leader1 + 4) % 11
+	follower5 := (leader1 + 5) % 11
+	follower6 := (leader1 + 6) % 11
+
+	partition2 := IntSet{}
+	partition2[leader1] = struct{}{}
+	partition2[follower1] = struct{}{}
+	partition2[follower2] = struct{}{}
+	partition2[follower3] = struct{}{}
+	partition2[follower4] = struct{}{}
+	partition2[follower5] = struct{}{}
+	partition2[follower6] = struct{}{}
+	set2 := IntSet{
+		0: struct{}{},
+		1: struct{}{},
+		2: struct{}{},
+		3: struct{}{},
+		4: struct{}{},
+		5: struct{}{},
+		6: struct{}{},
+		7: struct{}{},
+		8: struct{}{},
+		9: struct{}{},
+		10: struct{}{},
+	}
+	delete(set2, leader1)
+	delete(set2, follower1)
+	delete(set2, follower2)
+	delete(set2, follower3)
+	delete(set2, follower4)
+	delete(set2, follower5)
+	delete(set2, follower6)
+
+	cfg.disconnect_partition(partition2)
+	println("Forming partition2 with leader and 1 nodes\n")
+
+	time.Sleep(time.Millisecond*300)
+	cfg.checkLeaderInPartition(partition2)
+	cfg.checkNoLeaderInPartition(set2)
+	cfg.connect_partition(partition2)
+	time.Sleep(time.Millisecond*300)
+	cfg.checkOneLeader()
+
+	fmt.Printf("======================= END =======================\n\n")
+}
+
+func TestLeaderConsistencyHidden2A (t *testing.T) {
+	fmt.Printf("==================== 3 SERVERS ====================\n")
+	servers := 3
+	cfg := make_config(t, servers, false)
+	defer cfg.cleanup()
+
+	fmt.Printf("TestLeaderConsistencyHidden2A \n")
+
+	// is a leader elected?
+	fmt.Printf("Checking current leader\n")
+	leader1:=cfg.checkOneLeader()
+	cfg.disconnect(leader1)
+	time.Sleep(time.Millisecond*200)
+	leader2:=cfg.checkOneLeader()
+	cfg.connect(leader2)
+	time.Sleep(time.Millisecond*200)
+	if leader2!=cfg.checkOneLeader(){
+		t.Fatal("TestLeaderConsistencyHidden2A error")
+	}
+
+	fmt.Printf("======================= END =======================\n\n")
+}
+
 func TestBasicAgree2B(t *testing.T) {
 	fmt.Printf("==================== 5 SERVERS ====================\n")
 	servers := 5
