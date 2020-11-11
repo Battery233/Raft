@@ -117,8 +117,8 @@ const (
 
 const (
 	HeartbeatTime   = 125
-	ElectionMinTime = 275
-	ElectionMaxTime = 500
+	ElectionMinTime = 250
+	ElectionMaxTime = 400
 )
 
 //
@@ -182,36 +182,35 @@ type AppendEntriesReply struct {
 // Example RequestVote RPC handler
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// todo Your code here (2A, 2B)
+	// todo Your code here (2B)
 	rf.mux.Lock()
-	defer rf.mux.Unlock()
-
 	voteGranted := false
 	resetVoteFor := false
+	resetELectionTimer := false
 	if args.Term > rf.currentTerm {
 		rf.peerType = Follower
-		rf.logger.Printf("RequestVote: Peer %v term updated from %v to %v\n", rf.me, rf.currentTerm, args.Term)
+		rf.logger.Printf("RequestVote: Peer %v term updated from %v to %v. Previous type: %v\n", rf.me, rf.currentTerm, args.Term, rf.peerType)
 		rf.currentTerm = args.Term
 		//todo check if need to reset voted here?
 		resetVoteFor = true
 		//todo is this timer reset correct?
-		rf.resetElectionTimeoutChan <- struct{}{}
+		resetELectionTimer = true
 	}
 
 	if args.Term == rf.currentTerm && (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
 		lastLogIndex := len(rf.logEntries) - 1
+		//todo check the correctness of this code
+		resetELectionTimer = true
 		if args.LastLogTerm > rf.logEntries[lastLogIndex].Term ||
 			(args.LastLogTerm == rf.logEntries[lastLogIndex].Term && args.LastLogIndex >= lastLogIndex) {
 			voteGranted = true
 			resetVoteFor = false
 			rf.votedFor = args.CandidateId
-			//todo check the correctness of this code
-			rf.resetElectionTimeoutChan <- struct{}{}
 		} else {
-			rf.logger.Printf("RequestVote: Peer %v else 1\n", rf.me)
+			rf.logger.Printf("RequestVote: Peer %v votes no: log are not latest\n", rf.me)
 		}
 	} else {
-		rf.logger.Printf("RequestVote: Peer %v else 2\n", rf.me)
+		rf.logger.Printf("RequestVote: Peer %v else votes no: alreadu voted or term mismatch", rf.me)
 	}
 
 	if resetVoteFor {
@@ -221,6 +220,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = voteGranted
 	rf.logger.Printf("RequestVote: Peer %v votes for peer %v: %v,  args:%v, me:%v\n", rf.me, args.CandidateId, voteGranted, args.Term, rf.currentTerm)
+	rf.mux.Unlock()
+	if resetELectionTimer {
+		rf.resetElectionTimeoutChan <- struct{}{}
+	}
 }
 
 //
@@ -277,21 +280,26 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mux.Lock()
-	defer rf.mux.Unlock()
-	rf.logger.Printf("heartbeat received from Peer %v with term %v. (peer %v at term %v)!\n", args.LeaderId, args.Term,rf.me, rf.currentTerm)
+	resetElectionTimeout := false
+	rf.logger.Printf("heartbeat received from Peer %v with term %v. (peer %v at term %v)!\n", args.LeaderId, args.Term, rf.me, rf.currentTerm)
 	if args.Term < rf.currentTerm {
 		//todo if the receiver is a previous isolated follower with a high term value?
 		//todo after isolation, the isolated follower will have a very high term, but will not be the next leader
 		reply.Success = false
 		//todo reset timer?
 	} else {
+		rf.logger.Printf("AppendEntries: Peer %v term updated from %v to %v. Previous type: %v\n", rf.me, rf.currentTerm, args.Term, rf.peerType)
 		rf.currentTerm = args.Term
 		//todo if log mismatch
 		reply.Success = true
 		rf.peerType = Follower
-		rf.resetElectionTimeoutChan <- struct{}{}
+		resetElectionTimeout = true
 	}
 	reply.Term = rf.currentTerm
+	rf.mux.Unlock()
+	if resetElectionTimeout {
+		rf.resetElectionTimeoutChan <- struct{}{}
+	}
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -438,7 +446,23 @@ func (rf *Raft) mainRoutine() {
 		case <-electionTimeoutTimer.C:
 			currentVotes = 0
 			electionTimeoutTimer = randomElectionTimeoutTimer()
-			go rf.startElection()
+			//todo check if this lock is correct
+			rf.mux.Lock()
+			rf.logger.Printf("Peer %v starts an new election\n", rf.me)
+			rf.peerType = Candidate
+			rf.currentTerm++
+			rf.votedFor = rf.me
+			requestVoteArgs := &RequestVoteArgs{
+				Term:         rf.currentTerm,
+				CandidateId:  rf.me,
+				LastLogIndex: len(rf.logEntries) - 1,
+				LastLogTerm:  rf.logEntries[len(rf.logEntries)-1].Term,
+			}
+			rf.mux.Unlock()
+			for i := range rf.peers {
+				reply := &RequestVoteReply{}
+				go rf.sendRequestVote(i, requestVoteArgs, reply) //request rpc, unlock here
+			}
 		case reply := <-rf.appendEntriesResultChan:
 			rf.mux.Lock()
 			if reply.Success {
@@ -448,6 +472,8 @@ func (rf *Raft) mainRoutine() {
 					rf.currentTerm = reply.Term
 					rf.votedFor = -1
 					if rf.peerType != Follower {
+						rf.logger.Printf("appendEntriesResultChan: Peer %v steps down from %v to follower\n", rf.me, rf.peerType)
+						//step down todo initialize lear fields
 						rf.peerType = Follower
 						heartBeatTicker.Stop()
 					}
@@ -476,16 +502,20 @@ func (rf *Raft) mainRoutine() {
 					rf.currentTerm = reply.Term
 					rf.votedFor = -1
 					rf.peerType = Follower
-					heartBeatTicker.Stop()
+					rf.logger.Printf("requestVoteResultChan: Peer %v steps down from Candidate to follower\n", rf.me)
+					electionTimeoutTimer = randomElectionTimeoutTimer()
 				}
 			}
 			rf.mux.Unlock()
 		case <-heartBeatTicker.C:
 			//todo add actual entries later
 			rf.mux.Lock()
-			rf.logger.Printf("Time to send heartbeat! Am I a leader?:%v, term:%v \n", rf.peerType==Leader, rf.currentTerm)
+			rf.logger.Printf("Time to send heartbeat! Am I a leader?:%v, term:%v \n", rf.peerType == Leader, rf.currentTerm)
+			argsArray := make([]AppendEntriesArgs, len(rf.peers))
+			replyArray := make([]AppendEntriesReply, len(rf.peers))
+			me := rf.me
 			for i := range rf.peers {
-				args := &AppendEntriesArgs{
+				argsArray[i] = AppendEntriesArgs{
 					Term:         rf.currentTerm,
 					LeaderId:     rf.me,
 					PrevLogIndex: rf.nextIndex[i] - 1,
@@ -493,38 +523,17 @@ func (rf *Raft) mainRoutine() {
 					Entries:      nil,
 					LeaderCommit: rf.commitIndex,
 				}
-				reply := &AppendEntriesReply{}
-
-				if i != rf.me {
-					rf.mux.Unlock()
-					go rf.sendAppendEntries(i, args, reply)
-					rf.mux.Lock()
-				}
+				replyArray[i] = AppendEntriesReply{}
 			}
 			rf.mux.Unlock()
+			for i := 0; i < len(rf.peers); i++ {
+				if i != me {
+					go rf.sendAppendEntries(i, &argsArray[i], &replyArray[i])
+				}
+			}
 		}
 	}
 	//todo unlock check?!!!
-}
-
-func (rf *Raft) startElection() {
-	//todo check if this lock is correct
-	rf.mux.Lock()
-	rf.logger.Printf("Peer %v starts an new election\n", rf.me)
-	rf.peerType = Candidate
-	rf.currentTerm++
-	rf.votedFor = rf.me
-	requestVoteArgs := &RequestVoteArgs{
-		Term:         rf.currentTerm,
-		CandidateId:  rf.me,
-		LastLogIndex: len(rf.logEntries) - 1,
-		LastLogTerm:  rf.logEntries[len(rf.logEntries)-1].Term,
-	}
-	rf.mux.Unlock()
-	for i := range rf.peers {
-		reply := &RequestVoteReply{}
-		go rf.sendRequestVote(i, requestVoteArgs, reply) //request rpc, unlock here
-	}
 }
 
 func randomElectionTimeoutTimer() *time.Timer {
