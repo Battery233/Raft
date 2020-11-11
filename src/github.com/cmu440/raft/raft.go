@@ -44,7 +44,7 @@ import (
 
 // Set to false to disable debug logs completely
 // Make sure to set kEnableDebugLogs to false before submitting
-const kEnableDebugLogs = true
+const kEnableDebugLogs = false
 
 // Set to true to log to stdout instead of file
 const kLogToStdout = true
@@ -101,6 +101,7 @@ type Raft struct {
 	stopSignalChan           chan struct{}
 	resetElectionTimeoutChan chan struct{}
 	requestVoteResultChan    chan *RequestVoteReply
+	appendEntriesResultChan  chan *AppendEntriesReply
 }
 
 type logEntry struct {
@@ -115,9 +116,9 @@ const (
 )
 
 const (
-	HeartbeatTime   = 150
-	ElectionMinTime = 300
-	ElectionMaxTime = 600
+	HeartbeatTime   = 125
+	ElectionMinTime = 275
+	ElectionMaxTime = 500
 )
 
 //
@@ -278,19 +279,24 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.logger.Println("heartbeat!")
 	rf.mux.Lock()
 	defer rf.mux.Unlock()
-	rf.resetElectionTimeoutChan <- struct{}{}
 	if args.Term < rf.currentTerm {
 		reply.Success = false
+		//todo reset timer?
 	} else {
 		rf.currentTerm = args.Term
 		//todo if log mismatch
 		reply.Success = true
+		rf.peerType = Follower
+		rf.resetElectionTimeoutChan <- struct{}{}
 	}
 	reply.Term = rf.currentTerm
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	if ok {
+		rf.appendEntriesResultChan <- reply
+	}
 	return ok
 }
 
@@ -379,6 +385,7 @@ func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 		stopSignalChan:           make(chan struct{}),
 		resetElectionTimeoutChan: make(chan struct{}),
 		requestVoteResultChan:    make(chan *RequestVoteReply),
+		appendEntriesResultChan:  make(chan *AppendEntriesReply),
 	}
 
 	if kEnableDebugLogs {
@@ -424,11 +431,26 @@ func (rf *Raft) mainRoutine() {
 			rf.logger.Printf("Peer %v stop() called!\n", rf.me)
 			return
 		case <-rf.resetElectionTimeoutChan:
+			heartBeatTicker.Stop()
 			electionTimeoutTimer = randomElectionTimeoutTimer()
 		case <-electionTimeoutTimer.C:
 			currentVotes = 0
 			electionTimeoutTimer = randomElectionTimeoutTimer()
 			go rf.startElection()
+		case reply := <-rf.appendEntriesResultChan:
+			if reply.Success {
+				//todo
+			} else {
+				if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.votedFor = -1
+					if rf.peerType != Follower {
+						rf.peerType = Follower
+						heartBeatTicker.Stop()
+					}
+					electionTimeoutTimer = randomElectionTimeoutTimer()
+				}
+			}
 		case reply := <-rf.requestVoteResultChan:
 			rf.mux.Lock()
 			if rf.peerType == Candidate {
@@ -499,7 +521,9 @@ func (rf *Raft) sendHeartbeats() {
 		reply := &AppendEntriesReply{}
 
 		if i != rf.me {
+			rf.mux.Unlock()
 			go rf.sendAppendEntries(i, args, reply)
+			rf.mux.Lock()
 		}
 	}
 
