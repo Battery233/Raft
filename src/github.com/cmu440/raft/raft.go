@@ -185,7 +185,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// todo Your code here (2B)
 	rf.mux.Lock()
 	voteGranted := false
-	resetELectionTimer := false
+	resetElectionTimer := false
 	if args.Term > rf.currentTerm {
 		rf.logger.Printf("RequestVote: Peer %v term updated from %v to %v. Previous type: %v\n", rf.me, rf.currentTerm, args.Term, rf.peerType)
 		rf.peerType = Follower
@@ -193,13 +193,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		//todo check if need to reset voted here?
 		rf.votedFor = -1
 		//todo is this timer reset correct?
-		resetELectionTimer = true
+		resetElectionTimer = true
 	}
 
 	if args.Term == rf.currentTerm && (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
 		lastLogIndex := len(rf.logEntries) - 1
 		//todo check the correctness of this code
-		resetELectionTimer = true
+		resetElectionTimer = true
 		if args.LastLogTerm > rf.logEntries[lastLogIndex].Term ||
 			(args.LastLogTerm == rf.logEntries[lastLogIndex].Term && args.LastLogIndex >= lastLogIndex) {
 			voteGranted = true
@@ -215,7 +215,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = voteGranted
 	rf.logger.Printf("RequestVote: Peer %v votes for peer %v: %v,  args:%v, me:%v\n", rf.me, args.CandidateId, voteGranted, args.Term, rf.currentTerm)
 	rf.mux.Unlock()
-	if resetELectionTimer {
+	if resetElectionTimer {
 		rf.resetElectionTimeoutChan <- struct{}{}
 	}
 }
@@ -490,7 +490,7 @@ func (rf *Raft) mainRoutine() {
 					if currentVotes >= majority {
 						rf.logger.Printf("Peer %v just elected as the leader!\n", rf.me)
 						//send heartBeat right after it! //todo check it
-						heartBeatTimer.Reset(time.Millisecond * time.Duration(1))
+						heartBeatTimer.Reset(time.Millisecond * time.Duration(0))
 						//todo restart it when the leader steps down!
 						electionTimeoutTimer.Stop()
 						rf.peerType = Leader
