@@ -65,9 +65,6 @@ type ApplyCommand struct {
 	Command interface{}
 }
 
-//todo set print to false
-//todo check struct upper cases
-
 //
 // Raft struct
 // ===========
@@ -173,8 +170,6 @@ type AppendEntriesReply struct {
 	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
 }
 
-//todo implementation!
-
 //
 // RequestVote
 // ===========
@@ -190,9 +185,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.logger.Printf("RequestVote: Peer %v term updated from %v to %v. Previous type: %v\n", rf.me, rf.currentTerm, args.Term, rf.peerType)
 		rf.peerType = Follower
 		rf.currentTerm = args.Term
-		//todo check if need to reset voted here?
 		rf.votedFor = -1
-		//todo is this timer reset correct?
 		resetElectionTimer = true
 	}
 
@@ -282,7 +275,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		//todo reset timer?
 	} else {
-		if rf.currentTerm<args.Term{
+		if rf.currentTerm < args.Term {
 			rf.logger.Printf("AppendEntries: Peer %v term updated from %v to %v. Previous type: %v\n", rf.me, rf.currentTerm, args.Term, rf.peerType)
 			rf.currentTerm = args.Term
 			rf.votedFor = -1
@@ -330,11 +323,19 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader
 //
 func (rf *Raft) PutCommand(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+	rf.mux.Lock()
+	defer rf.mux.Unlock()
 
-	// Your code here (2B)
+	index := rf.commitIndex
+	term := rf.commitIndex
+	isLeader := rf.peerType == Leader
+
+	if isLeader {
+		rf.logEntries = append(rf.logEntries, logEntry{
+			Command: command,
+			Term:    rf.currentTerm,
+		})
+	}
 
 	return index, term, isLeader
 }
@@ -445,7 +446,7 @@ func (rf *Raft) mainRoutine() {
 			electionTimeoutTimer = randomElectionTimeoutTimer()
 			//todo check if this lock is correct
 			rf.mux.Lock()
-			me:=rf.me
+			me := rf.me
 			rf.logger.Printf("Peer %v starts an new election\n", rf.me)
 			rf.peerType = Candidate
 			rf.currentTerm++
@@ -460,7 +461,7 @@ func (rf *Raft) mainRoutine() {
 			rf.mux.Unlock()
 			for i := range rf.peers {
 				//todo if the peer becomes a follower when sending
-				if i!=me{
+				if i != me {
 					go rf.sendRequestVote(i, requestVoteArgs, &RequestVoteReply{}) //request rpc, unlock here
 				}
 			}
@@ -510,11 +511,10 @@ func (rf *Raft) mainRoutine() {
 			}
 			rf.mux.Unlock()
 		case <-heartBeatTimer.C:
-			//todo change this to a timer later?
 			heartBeatTimer.Reset(time.Millisecond * time.Duration(HeartbeatTime))
 			//todo add actual entries later
 			rf.mux.Lock()
-			if rf.peerType!=Leader {
+			if rf.peerType != Leader {
 				rf.mux.Unlock()
 				break
 			}
@@ -541,7 +541,6 @@ func (rf *Raft) mainRoutine() {
 			}
 		}
 	}
-	//todo unlock check?!!!
 }
 
 func randomElectionTimeoutTimer() *time.Timer {
