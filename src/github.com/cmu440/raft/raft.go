@@ -44,7 +44,7 @@ import (
 
 // Set to false to disable debug logs completely
 // Make sure to set kEnableDebugLogs to false before submitting
-const kEnableDebugLogs = false
+const kEnableDebugLogs = true
 
 // Set to true to log to stdout instead of file
 const kLogToStdout = true
@@ -268,12 +268,12 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mux.Lock()
 	resetElectionTimeout := false
-	rf.logger.Printf("heartbeat received from Peer %v with term %v. (peer %v at term %v)!\n", args.LeaderId, args.Term, rf.me, rf.currentTerm)
 	if args.Term < rf.currentTerm {
 		//todo if the receiver is a previous isolated follower with a high term value?
 		//todo after isolation, the isolated follower will have a very high term, but will not be the next leader
 		reply.Success = false
 		//todo reset timer?
+		rf.logger.Printf("AppendEntries from Peer %v with term %v. (peer %v at term %v)!\n", args.LeaderId, args.Term, rf.me, rf.currentTerm)
 	} else if args.Entries == nil {
 		//this is heart beat
 		reply.Success = true
@@ -289,14 +289,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		if args.PrevLogIndex > len(rf.logEntries)-1 {
 			reply.Success = false
+			resetElectionTimeout = true
+			rf.logger.Printf("AppendEntries: Peer %v at term %v. Append false. PrevLogIndex %v is greater than logEntries length \n", rf.me, rf.currentTerm, args.PrevLogIndex)
 		} else if rf.logEntries[args.PrevLogIndex].Term != args.PrevLogTerm {
 			//todo check it
 			rf.logEntries = rf.logEntries[:args.PrevLogIndex]
 			reply.Success = false
+			resetElectionTimeout = true
+			rf.logger.Printf("AppendEntries: Peer %v at term %v. Append false. Log conflict at PrevLogIndex %v\n", rf.me, rf.currentTerm, args.PrevLogIndex)
 		} else {
 			rf.logEntries = append(rf.logEntries[:args.PrevLogIndex+1], args.Entries...)
 			reply.Success = true
 			resetElectionTimeout = true
+			rf.logger.Printf("AppendEntries: Peer %v at term %v. append %v more entries. Total valid entry lenth now: %v\n", rf.me, rf.currentTerm, len(args.Entries), len(rf.logEntries)-1)
+			for _, v := range args.Entries {
+				rf.logger.Printf("Content of the entry appended-> Term:%v, %v\n", v.Term, v.Command)
+			}
 		}
 	}
 
@@ -305,8 +313,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.LeaderCommit > rf.commitIndex {
 		if args.LeaderCommit <= len(rf.logEntries)-1 {
 			rf.commitIndex = args.LeaderCommit
+			rf.logger.Printf("AppendEntries: Peer %v at term %v. Update commmitIndex to LeaderCommit:%v\n", rf.me, rf.currentTerm, args.LeaderCommit)
 		} else {
 			rf.commitIndex = len(rf.logEntries) - 1
+			rf.logger.Printf("AppendEntries: Peer %v at term %v. Update commmitIndex to Length of entries -1 :%v\n", rf.me, rf.currentTerm, rf.commitIndex)
 		}
 	}
 
@@ -317,6 +327,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			Index:   rf.lastApplied,
 			Command: rf.logEntries[rf.lastApplied].Command,
 		}
+		rf.logger.Printf("AppendEntries: Peer %v using applyChan for log index: %v, command: %v", rf.me, rf.lastApplied, rf.logEntries[rf.lastApplied].Command)
 	}
 
 	rf.mux.Unlock()
@@ -361,18 +372,19 @@ func (rf *Raft) PutCommand(command interface{}) (int, int, bool) {
 	rf.mux.Lock()
 	defer rf.mux.Unlock()
 
-	index := rf.commitIndex
 	term := rf.commitIndex
 	isLeader := rf.peerType == Leader
 
 	if isLeader {
+		rf.matchIndex[rf.me] = len(rf.logEntries)
+		rf.nextIndex[rf.me] = rf.matchIndex[rf.me] + 1
 		rf.logEntries = append(rf.logEntries, logEntry{
 			Command: command,
 			Term:    rf.currentTerm,
 		})
+		rf.logger.Printf("PutCommand: Peer %v at term %v. Index in log entries: %v, Command %v", rf.me, rf.currentTerm, len(rf.logEntries)-1, command)
 	}
-
-	return index, term, isLeader
+	return len(rf.logEntries) - 1, term, isLeader
 }
 
 //
@@ -482,7 +494,7 @@ func (rf *Raft) mainRoutine() {
 			//todo check if this lock is correct
 			rf.mux.Lock()
 			me := rf.me
-			rf.logger.Printf("Peer %v starts an new election\n", rf.me)
+			//rf.logger.Printf("Peer %v starts an new election\n", rf.me)
 			rf.peerType = Candidate
 			rf.currentTerm++
 			rf.votedFor = rf.me
@@ -505,7 +517,6 @@ func (rf *Raft) mainRoutine() {
 			if reply.Success {
 				rf.matchIndex[reply.Id] = reply.Index
 				rf.nextIndex[reply.Id] = reply.Index + 1
-				//todo skip if its a heart beat reply
 				rf.updateCommitIndex(reply.Index, majority) //update commitIndex and apply status to state machine
 				for rf.lastApplied < rf.commitIndex {
 					rf.lastApplied++
@@ -513,6 +524,7 @@ func (rf *Raft) mainRoutine() {
 						Index:   rf.lastApplied,
 						Command: rf.logEntries[rf.lastApplied].Command,
 					}
+					rf.logger.Printf("appendEntriesResultChan: Leader Peer %v using applyChan for log index: %v, command: %v", rf.me, rf.lastApplied, rf.logEntries[rf.lastApplied].Command)
 				}
 			} else if reply.Term > rf.currentTerm {
 				rf.currentTerm = reply.Term
@@ -524,6 +536,7 @@ func (rf *Raft) mainRoutine() {
 				electionTimeoutTimer = randomElectionTimeoutTimer()
 			} else { //log conflict //todo check!
 				rf.nextIndex[reply.Id]--
+				rf.logger.Printf("appendEntriesResultChan: Log confilct: Peer %v nextIndex--. Now value is %v\n", reply.Id, rf.nextIndex[reply.Id])
 			}
 			rf.mux.Unlock()
 		case reply := <-rf.requestVoteResultChan:
@@ -559,7 +572,7 @@ func (rf *Raft) mainRoutine() {
 				rf.mux.Unlock()
 				break
 			}
-			rf.logger.Printf("Time to send heartbeat! Am I a leader?:%v, term:%v \n", rf.peerType == Leader, rf.currentTerm)
+			//rf.logger.Printf("Time to send heartbeat! Am I a leader?:%v, term:%v \n", rf.peerType == Leader, rf.currentTerm)
 			argsArray := make([]AppendEntriesArgs, len(rf.peers))
 			replyArray := make([]AppendEntriesReply, len(rf.peers))
 			me := rf.me
@@ -593,20 +606,20 @@ func (rf *Raft) mainRoutine() {
 }
 
 func (rf *Raft) updateCommitIndex(upperBound int, majority int) {
-	for rf.commitIndex <= upperBound {
-		index := rf.commitIndex + 1
+	for N := rf.commitIndex + 1; N <= upperBound; N++ {
 		count := 0
 		for _, v := range rf.matchIndex {
-			if v >= index {
+			if v >= N {
 				count++
 			}
 			//todo check this: log[N]?
 			if count >= majority {
-				if rf.currentTerm == rf.logEntries[index].Term {
-					rf.commitIndex++
+				if rf.currentTerm == rf.logEntries[N].Term {
+					rf.logger.Printf("Leader: majority agree achieved at log id = %v, term = %v \n", N, rf.currentTerm)
+					rf.commitIndex = N
 					break
 				} else {
-					rf.logger.Printf("Leader: majority agree achieved at log id = %v but term mismatch. Expect term = %v but get %v \n", index, rf.currentTerm, rf.logEntries[index].Term)
+					rf.logger.Printf("Leader: majority agree achieved at log id = %v but term mismatch. Expect term = %v but get %v \n", N, rf.currentTerm, rf.logEntries[N].Term)
 				}
 			}
 		}
