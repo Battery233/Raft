@@ -166,6 +166,8 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
+	Id      int  //the id of the peer
+	Index   int  // the last index of those appended logs
 	Term    int  // currentTerm, for leader to update itself
 	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
 }
@@ -177,7 +179,6 @@ type AppendEntriesReply struct {
 // Example RequestVote RPC handler
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// todo Your code here (2B)
 	rf.mux.Lock()
 	voteGranted := false
 	resetElectionTimer := false
@@ -191,7 +192,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	if args.Term == rf.currentTerm && (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
 		lastLogIndex := len(rf.logEntries) - 1
-		//todo check the correctness of this code
 		resetElectionTimer = true
 		if args.LastLogTerm > rf.logEntries[lastLogIndex].Term ||
 			(args.LastLogTerm == rf.logEntries[lastLogIndex].Term && args.LastLogIndex >= lastLogIndex) {
@@ -274,25 +274,60 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//todo after isolation, the isolated follower will have a very high term, but will not be the next leader
 		reply.Success = false
 		//todo reset timer?
+	} else if args.Entries == nil {
+		//this is heart beat
+		reply.Success = true
+		rf.peerType = Follower
+		resetElectionTimeout = true
 	} else {
 		if rf.currentTerm < args.Term {
 			rf.logger.Printf("AppendEntries: Peer %v term updated from %v to %v. Previous type: %v\n", rf.me, rf.currentTerm, args.Term, rf.peerType)
 			rf.currentTerm = args.Term
 			rf.votedFor = -1
 		}
-		//todo if log mismatch
-		reply.Success = true
 		rf.peerType = Follower
-		resetElectionTimeout = true
+
+		if args.PrevLogIndex > len(rf.logEntries)-1 {
+			reply.Success = false
+		} else if rf.logEntries[args.PrevLogIndex].Term != args.PrevLogTerm {
+			//todo check it
+			rf.logEntries = rf.logEntries[:args.PrevLogIndex]
+			reply.Success = false
+		} else {
+			rf.logEntries = append(rf.logEntries[:args.PrevLogIndex+1], args.Entries...)
+			reply.Success = true
+			resetElectionTimeout = true
+		}
 	}
+
 	reply.Term = rf.currentTerm
+
+	if args.LeaderCommit > rf.commitIndex {
+		if args.LeaderCommit <= len(rf.logEntries)-1 {
+			rf.commitIndex = args.LeaderCommit
+		} else {
+			rf.commitIndex = len(rf.logEntries) - 1
+		}
+	}
+
+	// first commit to state machines
+	for rf.lastApplied < rf.commitIndex {
+		rf.lastApplied++
+		rf.applyChan <- ApplyCommand{
+			Index:   rf.lastApplied,
+			Command: rf.logEntries[rf.lastApplied].Command,
+		}
+	}
+
 	rf.mux.Unlock()
+
 	if resetElectionTimeout {
 		rf.resetElectionTimeoutChan <- struct{}{}
 	}
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	//todo check if reply.Index !=0
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	if ok {
 		rf.appendEntriesResultChan <- reply
@@ -468,19 +503,27 @@ func (rf *Raft) mainRoutine() {
 		case reply := <-rf.appendEntriesResultChan:
 			rf.mux.Lock()
 			if reply.Success {
-				//todo
-			} else {
-				if reply.Term > rf.currentTerm {
-					rf.currentTerm = reply.Term
-					rf.votedFor = -1
-					if rf.peerType != Follower {
-						rf.logger.Printf("appendEntriesResultChan: Peer %v steps down from %v to follower\n", rf.me, rf.peerType)
-						//step down todo initialize lear fields
-						rf.peerType = Follower
-						heartBeatTimer.Stop()
+				rf.matchIndex[reply.Id] = reply.Index
+				rf.nextIndex[reply.Id] = reply.Index + 1
+				//todo skip if its a heart beat reply
+				rf.updateCommitIndex(reply.Index, majority) //update commitIndex and apply status to state machine
+				for rf.lastApplied < rf.commitIndex {
+					rf.lastApplied++
+					rf.applyChan <- ApplyCommand{
+						Index:   rf.lastApplied,
+						Command: rf.logEntries[rf.lastApplied].Command,
 					}
-					electionTimeoutTimer = randomElectionTimeoutTimer()
 				}
+			} else if reply.Term > rf.currentTerm {
+				rf.currentTerm = reply.Term
+				rf.votedFor = -1
+				rf.logger.Printf("appendEntriesResultChan: Peer %v steps down from %v to follower\n", rf.me, rf.peerType)
+				//step down todo initialize lear fields
+				rf.peerType = Follower
+				heartBeatTimer.Stop()
+				electionTimeoutTimer = randomElectionTimeoutTimer()
+			} else { //log conflict //todo check!
+				rf.nextIndex[reply.Id]--
 			}
 			rf.mux.Unlock()
 		case reply := <-rf.requestVoteResultChan:
@@ -492,7 +535,6 @@ func (rf *Raft) mainRoutine() {
 						rf.logger.Printf("Peer %v just elected as the leader!\n", rf.me)
 						//send heartBeat right after it! //todo check it
 						heartBeatTimer.Reset(time.Millisecond * time.Duration(0))
-						//todo restart it when the leader steps down!
 						electionTimeoutTimer.Stop()
 						rf.peerType = Leader
 						for i := range rf.nextIndex {
@@ -512,7 +554,6 @@ func (rf *Raft) mainRoutine() {
 			rf.mux.Unlock()
 		case <-heartBeatTimer.C:
 			heartBeatTimer.Reset(time.Millisecond * time.Duration(HeartbeatTime))
-			//todo add actual entries later
 			rf.mux.Lock()
 			if rf.peerType != Leader {
 				rf.mux.Unlock()
@@ -522,16 +563,24 @@ func (rf *Raft) mainRoutine() {
 			argsArray := make([]AppendEntriesArgs, len(rf.peers))
 			replyArray := make([]AppendEntriesReply, len(rf.peers))
 			me := rf.me
+			lastLogIndex := len(rf.logEntries) - 1
 			for i := range rf.peers {
+				var entries []logEntry = nil
+				if lastLogIndex >= rf.nextIndex[i] {
+					entries = rf.logEntries[rf.nextIndex[i]:]
+				}
 				argsArray[i] = AppendEntriesArgs{
 					Term:         rf.currentTerm,
 					LeaderId:     rf.me,
 					PrevLogIndex: rf.nextIndex[i] - 1,
 					PrevLogTerm:  rf.logEntries[rf.nextIndex[i]-1].Term,
-					Entries:      nil,
+					Entries:      entries,
 					LeaderCommit: rf.commitIndex,
 				}
-				replyArray[i] = AppendEntriesReply{}
+				replyArray[i] = AppendEntriesReply{
+					Id:    i,
+					Index: lastLogIndex,
+				}
 			}
 			rf.mux.Unlock()
 			for i := 0; i < len(rf.peers); i++ {
@@ -539,6 +588,30 @@ func (rf *Raft) mainRoutine() {
 					go rf.sendAppendEntries(i, &argsArray[i], &replyArray[i])
 				}
 			}
+		}
+	}
+}
+
+func (rf *Raft) updateCommitIndex(upperBound int, majority int) {
+	for rf.commitIndex <= upperBound {
+		index := rf.commitIndex + 1
+		count := 0
+		for _, v := range rf.matchIndex {
+			if v >= index {
+				count++
+			}
+			//todo check this: log[N]?
+			if count >= majority {
+				if rf.currentTerm == rf.logEntries[index].Term {
+					rf.commitIndex++
+					break
+				} else {
+					rf.logger.Printf("Leader: majority agree achieved at log id = %v but term mismatch. Expect term = %v but get %v \n", index, rf.currentTerm, rf.logEntries[index].Term)
+				}
+			}
+		}
+		if count < majority {
+			return
 		}
 	}
 }
