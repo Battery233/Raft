@@ -44,7 +44,7 @@ import (
 
 // Set to false to disable debug logs completely
 // Make sure to set kEnableDebugLogs to false before submitting
-const kEnableDebugLogs = true
+const kEnableDebugLogs = false
 
 // Set to true to log to stdout instead of file
 const kLogToStdout = true
@@ -81,7 +81,6 @@ type Raft struct {
 	peerType  int
 	//Persistent state on all servers:
 	currentTerm int //latest term server has seen (initialized to 0 on first boot, increases monotonically)
-	//todo update votedFor to -1 when a new term starts
 	votedFor   int //candidateId that received vote in current term (or null if none)
 	logEntries []logEntry
 
@@ -90,7 +89,6 @@ type Raft struct {
 	lastApplied int
 
 	//Volatile state on leaders:
-	//todo Reinitialized after election
 	nextIndex  []int
 	matchIndex []int
 
@@ -272,7 +270,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//todo if the receiver is a previous isolated follower with a high term value?
 		//todo after isolation, the isolated follower will have a very high term, but will not be the next leader
 		reply.Success = false
-		//todo reset timer?
 		rf.logger.Printf("AppendEntries from Peer %v with term %v. (peer %v at term %v)!\n", args.LeaderId, args.Term, rf.me, rf.currentTerm)
 	} else if args.Entries == nil {
 		//this is heart beat
@@ -292,7 +289,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			resetElectionTimeout = true
 			rf.logger.Printf("AppendEntries: Peer %v at term %v. Append false. PrevLogIndex %v is greater than logEntries length \n", rf.me, rf.currentTerm, args.PrevLogIndex)
 		} else if rf.logEntries[args.PrevLogIndex].Term != args.PrevLogTerm {
-			//todo check it
 			rf.logEntries = rf.logEntries[:args.PrevLogIndex]
 			reply.Success = false
 			resetElectionTimeout = true
@@ -338,7 +334,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	//todo check if reply.Index !=0
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	if ok {
 		rf.appendEntriesResultChan <- reply
@@ -430,7 +425,7 @@ func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 		me:                       me,
 		applyChan:                applyCh,
 		peerType:                 Follower,
-		currentTerm:              0,
+		currentTerm:              -1,
 		votedFor:                 -1,
 		logEntries:               make([]logEntry, 1),
 		commitIndex:              0,
@@ -491,7 +486,6 @@ func (rf *Raft) mainRoutine() {
 		case <-electionTimeoutTimer.C:
 			currentVotes = 0
 			electionTimeoutTimer = randomElectionTimeoutTimer()
-			//todo check if this lock is correct
 			rf.mux.Lock()
 			me := rf.me
 			//rf.logger.Printf("Peer %v starts an new election\n", rf.me)
@@ -530,7 +524,7 @@ func (rf *Raft) mainRoutine() {
 				rf.currentTerm = reply.Term
 				rf.votedFor = -1
 				rf.logger.Printf("appendEntriesResultChan: Peer %v steps down from %v to follower\n", rf.me, rf.peerType)
-				//step down todo initialize lear fields
+				//step down
 				rf.peerType = Follower
 				heartBeatTimer.Stop()
 				electionTimeoutTimer = randomElectionTimeoutTimer()
@@ -612,14 +606,13 @@ func (rf *Raft) updateCommitIndex(upperBound int, majority int) {
 			if v >= N {
 				count++
 			}
-			//todo check this: log[N]?
 			if count >= majority {
 				if rf.currentTerm == rf.logEntries[N].Term {
 					rf.logger.Printf("Leader: majority agree achieved at log id = %v, term = %v \n", N, rf.currentTerm)
 					rf.commitIndex = N
 					break
 				} else {
-					rf.logger.Printf("Leader: majority agree achieved at log id = %v but term mismatch. Expect term = %v but get %v \n", N, rf.currentTerm, rf.logEntries[N].Term)
+					//rf.logger.Printf("Leader: majority agree achieved at log id = %v but term mismatch. Expect term = %v but get %v \n", N, rf.currentTerm, rf.logEntries[N].Term)
 				}
 			}
 		}
